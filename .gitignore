@@ -186,3 +186,6 @@ AGENTS.md
 # piper assets (remove to avoid LFS)
 /src/lerobot/assets/piper_description/
 /src/lerobot/assets/piper_x_description/
+
+#others
+checkpoints
