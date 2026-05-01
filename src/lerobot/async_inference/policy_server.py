@@ -30,6 +30,7 @@ import threading
 import time
 from concurrent import futures
 from dataclasses import asdict
+from pathlib import Path
 from pprint import pformat
 from queue import Empty, Queue
 from typing import Any
@@ -38,6 +39,7 @@ import draccus
 import grpc
 import torch
 
+from lerobot.configs.policies import PreTrainedConfig
 from lerobot.policies.factory import get_policy_class, make_pre_post_processors
 from lerobot.processor import (
     PolicyAction,
@@ -89,6 +91,31 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         self.policy = None
         self.preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]] | None = None
         self.postprocessor: PolicyProcessorPipeline[PolicyAction, PolicyAction] | None = None
+
+    def _load_policy(self, policy_class, pretrained_name_or_path: str):
+        pretrained_path = Path(pretrained_name_or_path)
+
+        if pretrained_path.is_dir() and (pretrained_path / "adapter_config.json").is_file():
+            from peft import PeftConfig, PeftModel
+
+            self.logger.info("Detected PEFT adapter checkpoint. Loading base policy plus adapter.")
+            policy_config = PreTrainedConfig.from_pretrained(pretrained_name_or_path)
+            peft_config = PeftConfig.from_pretrained(pretrained_name_or_path)
+            base_model_path = peft_config.base_model_name_or_path
+
+            if not base_model_path:
+                raise ValueError(
+                    f"PEFT adapter at {pretrained_name_or_path} does not define base_model_name_or_path."
+                )
+
+            self.logger.info(f"Loading PEFT base policy from: {base_model_path}")
+            policy = policy_class.from_pretrained(base_model_path, config=policy_config)
+            policy = PeftModel.from_pretrained(policy, pretrained_name_or_path, config=peft_config)
+            policy.eval()
+            return policy, policy_config
+
+        policy = policy_class.from_pretrained(pretrained_name_or_path)
+        return policy, policy.config
 
     @property
     def running(self):
@@ -151,13 +178,13 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         policy_class = get_policy_class(self.policy_type)
 
         start = time.perf_counter()
-        self.policy = policy_class.from_pretrained(policy_specs.pretrained_name_or_path)
+        self.policy, policy_config = self._load_policy(policy_class, policy_specs.pretrained_name_or_path)
         self.policy.to(self.device)
 
         # Load preprocessor and postprocessor, overriding device to match requested device
         device_override = {"device": self.device}
         self.preprocessor, self.postprocessor = make_pre_post_processors(
-            self.policy.config,
+            policy_config,
             pretrained_path=policy_specs.pretrained_name_or_path,
             preprocessor_overrides={
                 "device_processor": device_override,

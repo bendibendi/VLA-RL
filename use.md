@@ -123,3 +123,50 @@ lerobot-dataset-viz \
 
 
 
+训练
+```bash
+cd /root/workspace/VLA-RL
+
+CUDA_VISIBLE_DEVICES=0,1 accelerate launch \
+  --multi_gpu \
+  --num_processes=2 \
+  --mixed_precision=bf16 \
+  $(which lerobot-train) \
+  --dataset.repo_id=aiden/blocks_to_box_1 \
+  --policy.type=pi05 \
+  --policy.pretrained_path=/root/workspace/VLA-RL/checkpoints/lerobot/pi05_base \
+  --policy.device=cuda \
+  --policy.dtype=bfloat16 \
+  --policy.gradient_checkpointing=true \
+  --peft.method=LORA \
+  --peft.r=16 \
+  --batch_size=4 \
+  --steps=30000 \
+  --save_freq=10000 \
+  --eval_freq=0 \
+  --output_dir=/root/workspace/VLA-RL/outputs/train/blocks_to_box_pi05_lora_bs8effective_30k \
+  --job_name=blocks_to_box_pi05_lora_bs8effective_30k \
+  --wandb.enable=false \
+  --policy.push_to_hub=false
+```
+
+
+
+部署
+```bash
+# 服务器
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES=0 \
+/root/miniforge/envs/evo-rl/bin/python -m lerobot.async_inference.policy_server \
+  --host=127.0.0.1 \
+  --port=8080 \
+  --fps=5 \
+  --inference_latency=0.2 \
+  --obs_queue_timeout=2
+
+# 本地
+ssh -N -o ExitOnForwardFailure=yes \
+  -L 8080:127.0.0.1:8080 \
+  root@180.76.108.184
+
+
+```
