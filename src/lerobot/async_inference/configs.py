@@ -143,6 +143,15 @@ class RobotClientConfig:
         metadata={"help": f"Name of aggregate function to use. Options: {list(AGGREGATE_FUNCTIONS.keys())}"},
     )
 
+    # RTC configuration
+    rtc_enabled: bool = field(default=False, metadata={"help": "Enable RTC for remote policy inference"})
+    rtc_execution_horizon: int = field(
+        default=10, metadata={"help": "RTC execution horizon used by the remote policy"}
+    )
+    rtc_max_guidance_weight: float = field(
+        default=10.0, metadata={"help": "RTC max guidance weight used by the remote policy"}
+    )
+
     # Debug configuration
     debug_visualize_queue_size: bool = field(
         default=False, metadata={"help": "Visualize the action queue size"}
@@ -179,6 +188,16 @@ class RobotClientConfig:
         if self.actions_per_chunk <= 0:
             raise ValueError(f"actions_per_chunk must be positive, got {self.actions_per_chunk}")
 
+        if self.rtc_execution_horizon <= 0:
+            raise ValueError(
+                f"rtc_execution_horizon must be positive, got {self.rtc_execution_horizon}"
+            )
+
+        if self.rtc_max_guidance_weight <= 0:
+            raise ValueError(
+                f"rtc_max_guidance_weight must be positive, got {self.rtc_max_guidance_weight}"
+            )
+
         self.aggregate_fn = get_aggregate_function(self.aggregate_fn_name)
 
     @classmethod
@@ -200,4 +219,7 @@ class RobotClientConfig:
             "task": self.task,
             "debug_visualize_queue_size": self.debug_visualize_queue_size,
             "aggregate_fn_name": self.aggregate_fn_name,
+            "rtc_enabled": self.rtc_enabled,
+            "rtc_execution_horizon": self.rtc_execution_horizon,
+            "rtc_max_guidance_weight": self.rtc_max_guidance_weight,
         }

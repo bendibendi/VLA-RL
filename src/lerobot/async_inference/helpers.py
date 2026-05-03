@@ -263,6 +263,13 @@ class FPSTracker:
 
 
 @dataclass
+class RemoteRTCConfig:
+    enabled: bool = False
+    execution_horizon: int | None = None
+    max_guidance_weight: float | None = None
+
+
+@dataclass
 class RemotePolicyConfig:
     policy_type: str
     pretrained_name_or_path: str
@@ -270,6 +277,7 @@ class RemotePolicyConfig:
     actions_per_chunk: int
     device: str = "cpu"
     rename_map: dict[str, str] = field(default_factory=dict)
+    rtc: RemoteRTCConfig = field(default_factory=RemoteRTCConfig)
 
 
 def _compare_observation_states(obs1_state: torch.Tensor, obs2_state: torch.Tensor, atol: float) -> bool:

@@ -41,6 +41,7 @@ import torch
 
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.policies.factory import get_policy_class, make_pre_post_processors
+from lerobot.policies.rtc.configuration_rtc import RTCConfig
 from lerobot.processor import (
     PolicyAction,
     PolicyProcessorPipeline,
@@ -91,6 +92,9 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         self.policy = None
         self.preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]] | None = None
         self.postprocessor: PolicyProcessorPipeline[PolicyAction, PolicyAction] | None = None
+        self._rtc_prev_chunk_left_over: torch.Tensor | None = None
+        self._rtc_last_delay_steps = 0
+        self._rtc_lock = threading.Lock()
 
     def _load_policy(self, policy_class, pretrained_name_or_path: str):
         pretrained_path = Path(pretrained_name_or_path)
@@ -133,6 +137,70 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
         with self._predicted_timesteps_lock:
             self._predicted_timesteps = set()
+        with self._rtc_lock:
+            self._rtc_prev_chunk_left_over = None
+            self._rtc_last_delay_steps = 0
+
+    def _policy_rtc_enabled(self) -> bool:
+        if self.policy is None:
+            return False
+        rtc_config = getattr(self.policy.config, "rtc_config", None)
+        return bool(rtc_config is not None and rtc_config.enabled)
+
+    def _apply_rtc_overrides(self, policy_specs: RemotePolicyConfig) -> None:
+        if self.policy is None or not policy_specs.rtc.enabled:
+            return
+
+        rtc_config = getattr(self.policy.config, "rtc_config", None)
+        if rtc_config is None:
+            rtc_config = RTCConfig()
+
+        rtc_config.enabled = True
+        if policy_specs.rtc.execution_horizon is not None:
+            rtc_config.execution_horizon = policy_specs.rtc.execution_horizon
+        if policy_specs.rtc.max_guidance_weight is not None:
+            rtc_config.max_guidance_weight = policy_specs.rtc.max_guidance_weight
+
+        self.policy.config.rtc_config = rtc_config
+        if hasattr(self.policy, "init_rtc_processor"):
+            self.policy.init_rtc_processor()
+
+        self.logger.info(
+            "RTC enabled | execution_horizon: %s | max_guidance_weight: %.3f",
+            rtc_config.execution_horizon,
+            rtc_config.max_guidance_weight,
+        )
+
+    def _build_rtc_kwargs(self) -> dict[str, Any]:
+        if not self._policy_rtc_enabled():
+            return {}
+
+        with self._rtc_lock:
+            prev_chunk_left_over = self._rtc_prev_chunk_left_over
+            delay_steps = self._rtc_last_delay_steps
+
+        return {
+            "prev_chunk_left_over": prev_chunk_left_over,
+            "inference_delay": delay_steps,
+            "execution_horizon": self.policy.config.rtc_config.execution_horizon,
+        }
+
+    def _update_rtc_state(self, raw_chunk: torch.Tensor, delay_steps: int) -> None:
+        if not self._policy_rtc_enabled():
+            return
+
+        if raw_chunk.ndim != 3:
+            raw_chunk = raw_chunk.unsqueeze(0)
+
+        max_steps = raw_chunk.shape[1]
+        bounded_delay_steps = min(max(delay_steps, 0), max_steps)
+        left_over = raw_chunk[:, bounded_delay_steps:, :].detach()
+        if left_over.shape[1] == 0:
+            left_over = None
+
+        with self._rtc_lock:
+            self._rtc_prev_chunk_left_over = left_over
+            self._rtc_last_delay_steps = bounded_delay_steps
 
     def Ready(self, request, context):  # noqa: N802
         client_id = context.peer()
@@ -179,6 +247,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
         start = time.perf_counter()
         self.policy, policy_config = self._load_policy(policy_class, policy_specs.pretrained_name_or_path)
+        self._apply_rtc_overrides(policy_specs)
         self.policy.to(self.device)
 
         # Load preprocessor and postprocessor, overriding device to match requested device
@@ -348,9 +417,11 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             for i, action in enumerate(action_chunk)
         ]
 
-    def _get_action_chunk(self, observation: dict[str, torch.Tensor]) -> torch.Tensor:
+    def _get_action_chunk(
+        self, observation: dict[str, torch.Tensor], rtc_kwargs: dict[str, Any] | None = None
+    ) -> torch.Tensor:
         """Get an action chunk from the policy. The chunk contains only"""
-        chunk = self.policy.predict_action_chunk(observation)
+        chunk = self.policy.predict_action_chunk(observation, **(rtc_kwargs or {}))
         if chunk.ndim != 3:
             chunk = chunk.unsqueeze(0)  # adding batch dimension, now shape is (B, chunk_size, action_dim)
 
@@ -383,8 +454,13 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
         """3. Get action chunk"""
         start_inference = time.perf_counter()
-        action_tensor = self._get_action_chunk(observation)
+        rtc_kwargs = self._build_rtc_kwargs()
+        action_tensor = self._get_action_chunk(observation, rtc_kwargs)
         inference_time = time.perf_counter() - start_inference
+        if rtc_kwargs:
+            end_to_end_delay_s = max(0.0, time.time() - observation_t.get_timestamp())
+            delay_steps = int(round(end_to_end_delay_s / self.config.environment_dt))
+            self._update_rtc_state(action_tensor, delay_steps)
         self.logger.info(
             f"Preprocessing and inference took {inference_time:.4f}s, action shape: {action_tensor.shape}"
         )

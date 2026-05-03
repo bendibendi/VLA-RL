@@ -74,6 +74,7 @@ from .helpers import (
     Observation,
     RawObservation,
     RemotePolicyConfig,
+    RemoteRTCConfig,
     TimedAction,
     TimedObservation,
     get_logger,
@@ -108,6 +109,11 @@ class RobotClient:
             lerobot_features,
             config.actions_per_chunk,
             config.policy_device,
+            rtc=RemoteRTCConfig(
+                enabled=config.rtc_enabled,
+                execution_horizon=config.rtc_execution_horizon if config.rtc_enabled else None,
+                max_guidance_weight=config.rtc_max_guidance_weight if config.rtc_enabled else None,
+            ),
         )
         self.channel = grpc.insecure_channel(
             self.server_address, grpc_channel_options(initial_backoff=f"{config.environment_dt:.4f}s")
