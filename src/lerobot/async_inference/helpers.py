@@ -229,6 +229,8 @@ class TimedAction(TimedData):
 class TimedObservation(TimedData):
     observation: RawObservation
     must_go: bool = False
+    inference_delay_steps: int | None = None
+    remaining_actions: int | None = None
 
     def get_observation(self):
         return self.observation

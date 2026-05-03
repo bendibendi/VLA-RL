@@ -92,7 +92,8 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         self.policy = None
         self.preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]] | None = None
         self.postprocessor: PolicyProcessorPipeline[PolicyAction, PolicyAction] | None = None
-        self._rtc_prev_chunk_left_over: torch.Tensor | None = None
+        self._rtc_prev_chunk: torch.Tensor | None = None
+        self._rtc_prev_chunk_start_timestep: int | None = None
         self._rtc_last_delay_steps = 0
         self._rtc_lock = threading.Lock()
 
@@ -138,7 +139,8 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         with self._predicted_timesteps_lock:
             self._predicted_timesteps = set()
         with self._rtc_lock:
-            self._rtc_prev_chunk_left_over = None
+            self._rtc_prev_chunk = None
+            self._rtc_prev_chunk_start_timestep = None
             self._rtc_last_delay_steps = 0
 
     def _policy_rtc_enabled(self) -> bool:
@@ -171,13 +173,49 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             rtc_config.max_guidance_weight,
         )
 
-    def _build_rtc_kwargs(self) -> dict[str, Any]:
+    def _build_rtc_kwargs(self, observation_t: TimedObservation) -> dict[str, Any]:
         if not self._policy_rtc_enabled():
             return {}
 
         with self._rtc_lock:
-            prev_chunk_left_over = self._rtc_prev_chunk_left_over
-            delay_steps = self._rtc_last_delay_steps
+            prev_chunk = self._rtc_prev_chunk
+            prev_chunk_start_timestep = self._rtc_prev_chunk_start_timestep
+            fallback_delay_steps = self._rtc_last_delay_steps
+
+        delay_steps = observation_t.inference_delay_steps
+        if delay_steps is None:
+            delay_steps = fallback_delay_steps
+        delay_steps = max(0, int(delay_steps or 0))
+
+        prev_chunk_left_over = None
+        offset = None
+        if prev_chunk is not None and prev_chunk_start_timestep is not None:
+            if prev_chunk.ndim != 3:
+                prev_chunk = prev_chunk.unsqueeze(0)
+
+            offset = observation_t.get_timestep() - prev_chunk_start_timestep
+            if offset < 0:
+                offset = 0
+
+            if offset < prev_chunk.shape[1]:
+                prev_chunk_left_over = prev_chunk[:, offset:, :].detach()
+                if observation_t.remaining_actions is not None:
+                    remaining_actions = max(0, int(observation_t.remaining_actions))
+                    prev_chunk_left_over = prev_chunk_left_over[:, :remaining_actions, :]
+                if prev_chunk_left_over.shape[1] == 0 or delay_steps >= prev_chunk_left_over.shape[1]:
+                    prev_chunk_left_over = None
+
+        leftover_steps = 0 if prev_chunk_left_over is None else prev_chunk_left_over.shape[1]
+        self.logger.info(
+            "RTC align | obs:%s prev_start:%s offset:%s delay:%s remaining:%s leftover:%s horizon:%s",
+            observation_t.get_timestep(),
+            prev_chunk_start_timestep,
+            offset,
+            delay_steps,
+            observation_t.remaining_actions,
+            leftover_steps,
+            self.policy.config.rtc_config.execution_horizon,
+        )
 
         return {
             "prev_chunk_left_over": prev_chunk_left_over,
@@ -185,22 +223,17 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             "execution_horizon": self.policy.config.rtc_config.execution_horizon,
         }
 
-    def _update_rtc_state(self, raw_chunk: torch.Tensor, delay_steps: int) -> None:
+    def _update_rtc_state(self, raw_chunk: torch.Tensor, start_timestep: int, delay_steps: int) -> None:
         if not self._policy_rtc_enabled():
             return
 
         if raw_chunk.ndim != 3:
             raw_chunk = raw_chunk.unsqueeze(0)
 
-        max_steps = raw_chunk.shape[1]
-        bounded_delay_steps = min(max(delay_steps, 0), max_steps)
-        left_over = raw_chunk[:, bounded_delay_steps:, :].detach()
-        if left_over.shape[1] == 0:
-            left_over = None
-
         with self._rtc_lock:
-            self._rtc_prev_chunk_left_over = left_over
-            self._rtc_last_delay_steps = bounded_delay_steps
+            self._rtc_prev_chunk = raw_chunk.detach()
+            self._rtc_prev_chunk_start_timestep = start_timestep
+            self._rtc_last_delay_steps = max(0, int(delay_steps or 0))
 
     def Ready(self, request, context):  # noqa: N802
         client_id = context.peer()
@@ -454,13 +487,12 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
         """3. Get action chunk"""
         start_inference = time.perf_counter()
-        rtc_kwargs = self._build_rtc_kwargs()
+        rtc_kwargs = self._build_rtc_kwargs(observation_t)
         action_tensor = self._get_action_chunk(observation, rtc_kwargs)
         inference_time = time.perf_counter() - start_inference
-        if rtc_kwargs:
-            end_to_end_delay_s = max(0.0, time.time() - observation_t.get_timestamp())
-            delay_steps = int(round(end_to_end_delay_s / self.config.environment_dt))
-            self._update_rtc_state(action_tensor, delay_steps)
+        if self._policy_rtc_enabled():
+            delay_steps = rtc_kwargs.get("inference_delay", 0)
+            self._update_rtc_state(action_tensor, observation_t.get_timestep(), delay_steps)
         self.logger.info(
             f"Preprocessing and inference took {inference_time:.4f}s, action shape: {action_tensor.shape}"
         )

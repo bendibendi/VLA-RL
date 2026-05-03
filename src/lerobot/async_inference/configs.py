@@ -151,6 +151,16 @@ class RobotClientConfig:
     rtc_max_guidance_weight: float = field(
         default=10.0, metadata={"help": "RTC max guidance weight used by the remote policy"}
     )
+    rtc_manual_delay_steps: int | None = field(
+        default=None,
+        metadata={
+            "help": "Override RTC inference delay in control steps. If unset, the client estimates it."
+        },
+    )
+    rtc_delay_ema_alpha: float = field(
+        default=0.25,
+        metadata={"help": "EMA alpha for client-side RTC delay estimation"},
+    )
 
     # Debug configuration
     debug_visualize_queue_size: bool = field(
@@ -198,6 +208,16 @@ class RobotClientConfig:
                 f"rtc_max_guidance_weight must be positive, got {self.rtc_max_guidance_weight}"
             )
 
+        if self.rtc_manual_delay_steps is not None and self.rtc_manual_delay_steps < 0:
+            raise ValueError(
+                f"rtc_manual_delay_steps must be non-negative, got {self.rtc_manual_delay_steps}"
+            )
+
+        if self.rtc_delay_ema_alpha < 0 or self.rtc_delay_ema_alpha > 1:
+            raise ValueError(
+                f"rtc_delay_ema_alpha must be between 0 and 1, got {self.rtc_delay_ema_alpha}"
+            )
+
         self.aggregate_fn = get_aggregate_function(self.aggregate_fn_name)
 
     @classmethod
@@ -222,4 +242,6 @@ class RobotClientConfig:
             "rtc_enabled": self.rtc_enabled,
             "rtc_execution_horizon": self.rtc_execution_horizon,
             "rtc_max_guidance_weight": self.rtc_max_guidance_weight,
+            "rtc_manual_delay_steps": self.rtc_manual_delay_steps,
+            "rtc_delay_ema_alpha": self.rtc_delay_ema_alpha,
         }

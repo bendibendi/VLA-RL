@@ -137,6 +137,7 @@ class RobotClient:
 
         # FPS measurement
         self.fps_tracker = FPSTracker(target_fps=self.config.fps)
+        self._rtc_delay_steps_ema: float | None = None
 
         self.logger.info("Robot connected and ready")
 
@@ -298,6 +299,19 @@ class RobotClient:
                 if len(timed_actions) > 0:
                     received_device = timed_actions[0].get_action().device.type
                     self.logger.debug(f"Received actions on device: {received_device}")
+                    response_delay_s = max(0.0, receive_time - timed_actions[0].get_timestamp())
+                    response_delay_steps = max(
+                        0, int(round(response_delay_s / self.config.environment_dt))
+                    )
+                    if self.config.rtc_manual_delay_steps is None:
+                        if self._rtc_delay_steps_ema is None:
+                            self._rtc_delay_steps_ema = float(response_delay_steps)
+                        else:
+                            alpha = self.config.rtc_delay_ema_alpha
+                            self._rtc_delay_steps_ema = (
+                                alpha * response_delay_steps
+                                + (1 - alpha) * self._rtc_delay_steps_ema
+                            )
 
                 # Move actions to client_device (e.g., for downstream planners that need GPU)
                 client_device = self.config.client_device
@@ -334,7 +348,8 @@ class RobotClient:
                         f"Latest action: #{latest_action} | "
                         f"Incoming actions: {incoming_timesteps[0]}:{incoming_timesteps[-1]} | "
                         f"Network latency (server->client): {server_to_client_latency:.2f}ms | "
-                        f"Deserialization time: {deserialize_time * 1000:.2f}ms"
+                        f"Deserialization time: {deserialize_time * 1000:.2f}ms | "
+                        f"RTC delay steps: {self._get_rtc_delay_steps()}"
                     )
 
                 # Update action queue
@@ -424,18 +439,21 @@ class RobotClient:
             with self.latest_action_lock:
                 latest_action = self.latest_action
 
-            observation = TimedObservation(
-                timestamp=time.time(),  # need time.time() to compare timestamps across client and server
-                observation=raw_observation,
-                timestep=max(latest_action, 0),
-            )
-
             obs_capture_time = time.perf_counter() - start_time
 
             # If there are no actions left in the queue, the observation must go through processing!
             with self.action_queue_lock:
-                observation.must_go = self.must_go.is_set() and self.action_queue.empty()
+                must_go = self.must_go.is_set() and self.action_queue.empty()
                 current_queue_size = self.action_queue.qsize()
+
+            observation = TimedObservation(
+                timestamp=time.time(),
+                observation=raw_observation,
+                timestep=max(latest_action, 0),
+                must_go=must_go,
+                inference_delay_steps=self._get_rtc_delay_steps(),
+                remaining_actions=current_queue_size,
+            )
 
             _ = self.send_observation(observation)
 
@@ -462,6 +480,13 @@ class RobotClient:
 
         except Exception as e:
             self.logger.error(f"Error in observation sender: {e}")
+
+    def _get_rtc_delay_steps(self) -> int | None:
+        if self.config.rtc_manual_delay_steps is not None:
+            return self.config.rtc_manual_delay_steps
+        if self._rtc_delay_steps_ema is None:
+            return None
+        return max(0, int(round(self._rtc_delay_steps_ema)))
 
     def control_loop(self, task: str, verbose: bool = False) -> tuple[Observation, Action]:
         """Combined function for executing actions and streaming observations"""
