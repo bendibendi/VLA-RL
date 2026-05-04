@@ -777,7 +777,13 @@ Examples:
         "--push-to-hub",
         action="store_true",
         help="Upload progress file to the dataset repo on HuggingFace Hub",
-        default=True,
+        default=False,
+    )
+    parser.add_argument(
+        "--no-push-to-hub",
+        action="store_false",
+        dest="push_to_hub",
+        help="Keep progress file local and skip uploading to the dataset repo",
     )
     parser.add_argument(
         "--stride",

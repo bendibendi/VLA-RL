@@ -118,7 +118,7 @@ lerobot-dataset-viz \
 
 
 
-# 训练
+# SFT训练
 ```bash
 # 双卡
 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES=0,1 accelerate launch \
@@ -179,6 +179,12 @@ accelerate launch \
   --steps=60000
 ```
 
+# RA-BC训练
+```bash
+
+
+```
+
 # 部署
 ```bash
 # 服务器
@@ -215,4 +221,36 @@ python -m lerobot.async_inference.robot_client \
   --chunk_size_threshold=0.0 \
   --aggregate_fn_name=latest_only \
   --fps=30
+
+# RTC部署
+python -m lerobot.async_inference.robot_client \
+  --robot.type=bi_so_follower \
+  --robot.id=bi_so101_follower \
+  --robot.calibration_dir=/media/aiden/Data/Dubuntu/lerobot_data/calibration/robots/so_follower \
+  --robot.left_arm_config.port=/dev/ttyACM0 \
+  --robot.right_arm_config.port=/dev/ttyACM1 \
+  --robot.left_arm_config.max_relative_target=5.0 \
+  --robot.right_arm_config.max_relative_target=5.0 \
+  --robot.left_arm_config.cameras='{ wrist: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30, fourcc: "MJPG"}}' \
+  --robot.right_arm_config.cameras='{ wrist: {type: opencv, index_or_path: 4, width: 640, height: 480, fps: 30, fourcc: "MJPG"}, front: {type: opencv, index_or_path: 6, width: 640, height: 480, fps: 30, fourcc: "MJPG"}}' \
+  --task="Pick up the objects and put them into the box." \
+  --server_address=127.0.0.1:8080 \
+  --policy_type=pi05 \
+  --pretrained_name_or_path=/root/workspace/VLA-RL/outputs/train/blocks_to_box_v2_pi05_full_bs2effective_30k/checkpoints/030000/pretrained_model \
+  --policy_device=cuda \
+  --client_device=cpu \
+  --actions_per_chunk=50 \
+  --chunk_size_threshold=0.65 \
+  --aggregate_fn_name=conservative \
+  --fps=30 \
+  --action_smoothing_alpha=0.55 \
+  --rtc_enabled=true \
+  --rtc_execution_horizon=10 \
+  --rtc_max_guidance_weight=1.0 \
+  --rtc_manual_delay_steps=8
+
+
+
+
+
 ```
